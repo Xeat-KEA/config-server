@@ -1,0 +1,71 @@
+pipeline {
+    agent any
+    tools {
+        gradle 'gradle'
+    }
+
+    environment {
+        IMAGE_NAME = "atom8426/ct-config"
+        APP_NAME = "ct-config-app"
+        TARGET_HOST = "config@172.16.211.116"
+        SSH_CREDENTIALS = "jenkins-ssh"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'main', credentialsId: 'github_access_token', url: 'https://github.com/Xeat-KEA/config-server.git'
+            }
+        }
+
+        stage('Build Gradle Project') {
+            steps {
+                sh '''
+                    echo 'gradlew 빌드 시작'
+                    chmod +x ./gradlew
+                    ./gradlew clean build
+                '''
+            }
+        }
+
+        stage('Build and Push Docker Image') {
+            steps {
+                script {
+                    sh "docker build -t ${IMAGE_NAME}:latest ."
+                    withCredentials([usernamePassword(credentialsId: 'docker_credential_id', usernameVariable: 'DOCKERHUB_USERNAME', passwordVariable: 'DOCKERHUB_PASSWORD')]) {
+                        docker.withRegistry('https://index.docker.io/v1/', 'docker_credential_id') {
+                            sh '''
+                                echo "$DOCKERHUB_PASSWORD" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+                                docker push "${IMAGE_NAME}:latest"
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to VM') {
+            steps {
+                script {
+                    sshagent(credentials: [SSH_CREDENTIALS]) {
+                        sh """
+                            ssh -o StrictHostKeyChecking=no ${TARGET_HOST} '
+                                docker pull ${IMAGE_NAME}:latest
+                                docker stop ${APP_NAME} || true
+                                docker rm ${APP_NAME} || true
+                                docker run -d --restart always --network host --name ${APP_NAME} \
+                                    ${IMAGE_NAME}:latest
+                            '
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            cleanWs()
+        }
+    }
+}
